@@ -1,0 +1,12 @@
+{
+  "name": "trade-market-demo",
+  "private": true,
+  "workspaces": ["apps/web", "apps/api"],
+  "scripts": {
+    "dev": "concurrently -n web,api -c cyan,magenta \"npm:dev:web\" \"npm:dev:api\"",
+    "dev:web": "npm --workspace apps/web run dev",
+    "dev:api": "npm --workspace apps/api run dev",
+    "build": "npm run build --workspace apps/api && npm run build --workspace apps/web"
+  },
+  "devDependencies": { "concurrently": "^9.1.2", "typescript": "^5.7.3" }
+}
