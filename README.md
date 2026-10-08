@@ -29,10 +29,10 @@ Market prices and paper trades are simulated sample data and do not place real m
 
 ## Database migrations
 
-Fresh databases load SQL files from `database/` through the Compose initialization mounts. For an existing database, apply each new migration once, in order, for example:
+Fresh databases load SQL files from `database/` through the Compose initialization mounts. For an existing database, apply each migration that has not already been applied, in order. For the withdrawal profile and limits migration:
 
 ```powershell
-Get-Content -Raw database/006_reward_cooldown.sql | docker compose exec -T db psql -v ON_ERROR_STOP=1 -U trademarket -d trademarket
+Get-Content -Raw database/008_withdrawal_profiles_and_limits.sql | docker compose exec -T db psql -v ON_ERROR_STOP=1 -U trademarket -d trademarket
 ```
 
 The `postgres_data` volume preserves existing data across restarts. `docker compose down -v` deletes that data.

@@ -20,7 +20,10 @@ const pool = new Pool({
   user: process.env.DB_USER ?? process.env.POSTGRES_USER ?? 'trademarket',
   password: process.env.DB_PASSWORD ?? process.env.POSTGRES_PASSWORD ?? 'trademarket',
   max: 10,
+  connectionTimeoutMillis: 5_000,
+  idleTimeoutMillis: 30_000,
 });
+pool.on('error', (error) => console.error('Unexpected idle PostgreSQL client error:', error));
 
 type AuthedRequest = Request & { userId?: string; userEmail?: string };
 const asyncRoute = (fn: (req: AuthedRequest, res: Response) => Promise<unknown>) =>
@@ -138,7 +141,7 @@ app.get('/api/v1/admin/summary', requireUser, requireAdmin, asyncRoute(async (_r
 
 app.get('/api/v1/admin/finance', requireUser, requireAdmin, asyncRoute(async (_req, res) => {
   const [config, users, referrals, transactions] = await Promise.all([
-    pool.query('select usdt_network as network, deposit_address as "depositAddress", deposit_qr_data_url as "depositQr", updated_at as "updatedAt" from platform_wallet_config where id = 1'),
+    pool.query('select usdt_network as network, deposit_address as "depositAddress", deposit_qr_data_url as "depositQr", minimum_withdrawal::text as "minimumWithdrawal", maximum_withdrawal::text as "maximumWithdrawal", updated_at as "updatedAt" from platform_wallet_config where id = 1'),
     pool.query(`with balances as (
       select user_id,
         coalesce(sum(amount) filter (where kind = 'deposit' and status = 'confirmed'), 0)::text as deposits,
@@ -167,7 +170,8 @@ app.get('/api/v1/admin/finance', requireUser, requireAdmin, asyncRoute(async (_r
       t.status, t.tx_hash as "txHash", t.wallet_address as "walletAddress", t.note, t.request_reason as "requestReason",
       t.cancellation_reason as "cancellationReason", t.review_reason as "reviewReason", t.cancellation_review_reason as "cancellationReviewReason",
       t.adjustment_direction as direction, (t.proof_image_data_url is not null) as "proofAvailable",
-      t.created_at as "createdAt", t.reviewed_at as "reviewedAt", reviewer.email as "reviewerEmail"
+      t.created_at as "createdAt", t.reviewed_at as "reviewedAt", reviewer.email as "reviewerEmail",
+      (t.recipient_qr_data_url is not null) as "payoutQrAvailable"
       from wallet_transactions t join users u on u.id = t.user_id
       left join users reviewer on reviewer.id = t.reviewed_by
       order by (t.status = 'pending') desc, t.created_at desc limit 500`),
@@ -256,19 +260,43 @@ app.get('/api/v1/admin/wallet-transactions/:id/proof', requireUser, requireAdmin
   res.json({ data: { proofImage: proof.rows[0].proofImage } });
 }));
 
+app.get('/api/v1/admin/wallet-transactions/:id/payout-qr', requireUser, requireAdmin, asyncRoute(async (req, res) => {
+  const result = await pool.query("select recipient_qr_data_url as \"payoutQr\" from wallet_transactions where id = $1 and kind = 'withdrawal'", [req.params.id]);
+  if (!result.rows[0]?.payoutQr) return res.status(404).json({ error: 'This withdrawal has no payout QR image.' });
+  res.json({ data: { payoutQr: result.rows[0].payoutQr } });
+}));
+
 const walletConfigSchema = z.object({
   network: z.string().trim().min(1).max(60),
   depositAddress: z.string().trim().min(8).max(200),
   depositQr: z.string().max(2_000_000).refine((value) => !value || /^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(value), 'QR must be a PNG, JPEG, or WebP image.'),
+  minimumWithdrawal: z.coerce.number().positive().max(1_000_000_000),
+  maximumWithdrawal: z.coerce.number().positive().max(1_000_000_000),
 });
 app.put('/api/v1/admin/wallet-config', requireUser, requireAdmin, asyncRoute(async (req, res) => {
   const parsed = walletConfigSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: 'Enter a supported network, deposit address, and valid QR image.' });
+  if (parsed.data.maximumWithdrawal < parsed.data.minimumWithdrawal) return res.status(400).json({ error: 'Maximum withdrawal must be at least the minimum withdrawal.' });
   const { rows } = await pool.query(`update platform_wallet_config set usdt_network = $1, deposit_address = $2,
-    deposit_qr_data_url = $3, updated_by = $4, updated_at = now() where id = 1
-    returning usdt_network as network, deposit_address as "depositAddress", deposit_qr_data_url as "depositQr", updated_at as "updatedAt"`,
-  [parsed.data.network, parsed.data.depositAddress, parsed.data.depositQr, req.userId]);
+    deposit_qr_data_url = $3, minimum_withdrawal = $4, maximum_withdrawal = $5, updated_by = $6, updated_at = now() where id = 1
+    returning usdt_network as network, deposit_address as "depositAddress", deposit_qr_data_url as "depositQr", minimum_withdrawal::text as "minimumWithdrawal", maximum_withdrawal::text as "maximumWithdrawal", updated_at as "updatedAt"`,
+  [parsed.data.network, parsed.data.depositAddress, parsed.data.depositQr, parsed.data.minimumWithdrawal, parsed.data.maximumWithdrawal, req.userId]);
   res.json({ data: rows[0] });
+}));
+
+const payoutProfileSchema = z.object({
+  address: z.string().trim().min(8).max(200),
+  qrImage: z.string().max(1_700_000).refine((value) => /^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(value), 'Upload a PNG, JPEG, or WebP wallet QR image.'),
+});
+app.put('/api/v1/wallet/payout-profile', requireUser, asyncRoute(async (req, res) => {
+  const parsed = payoutProfileSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: 'Enter a valid payout address and upload a PNG, JPEG, or WebP wallet QR image.' });
+  const { rows } = await pool.query(`insert into user_wallet_profiles (user_id, payout_address, payout_qr_data_url)
+    values ($1, $2, $3) on conflict (user_id) do update set payout_address = excluded.payout_address,
+      payout_qr_data_url = excluded.payout_qr_data_url, updated_at = now()
+    returning payout_address as address, payout_qr_data_url as "qrImage", updated_at as "updatedAt"`,
+  [req.userId, parsed.data.address, parsed.data.qrImage]);
+  res.json({ data: rows[0], notice: 'Withdrawal address and QR image saved.' });
 }));
 
 const transactionReviewSchema = z.object({ action: z.enum(['confirm_deposit', 'confirm_reward', 'pay_withdrawal', 'reject', 'approve_cancellation', 'deny_cancellation']), txHash: z.string().trim().min(16).max(200).optional(), reviewReason: z.string().trim().min(3).max(500).optional() });
@@ -380,8 +408,8 @@ app.patch('/api/v1/settings/password', requireUser, asyncRoute(async (req, res) 
 }));
 
 app.get('/api/v1/wallet', requireUser, asyncRoute(async (req, res) => {
-  const [settings, summary, transactions, rewardState] = await Promise.all([
-    pool.query('select usdt_network as network, deposit_address as "depositAddress", deposit_qr_data_url as "depositQr" from platform_wallet_config where id = 1'),
+  const [settings, summary, transactions, rewardState, payoutProfile] = await Promise.all([
+    pool.query('select usdt_network as network, deposit_address as "depositAddress", deposit_qr_data_url as "depositQr", minimum_withdrawal::text as "minimumWithdrawal", maximum_withdrawal::text as "maximumWithdrawal" from platform_wallet_config where id = 1'),
     pool.query(`select
       coalesce(sum(amount) filter (where kind = 'deposit' and status = 'confirmed'), 0)::text as "depositTotal",
       coalesce(sum(amount) filter (where kind = 'daily_reward' and status = 'confirmed'), 0)::text as "earningsTotal",
@@ -397,11 +425,12 @@ app.get('/api/v1/wallet', requireUser, asyncRoute(async (req, res) => {
       (select max(coalesce(t.reviewed_at, t.created_at)) from wallet_transactions t where t.user_id = m.user_id and t.kind = 'daily_reward' and t.status = 'confirmed') as "lastCollectedAt",
       exists(select 1 from wallet_transactions t where t.user_id = m.user_id and t.kind = 'daily_reward' and t.status = 'pending') as "pendingRequest"
       from user_memberships m where m.user_id = $1`, [req.userId]),
+    pool.query('select payout_address as address, payout_qr_data_url as "qrImage", updated_at as "updatedAt" from user_wallet_profiles where user_id = $1', [req.userId]),
   ]);
   const reward = rewardState.rows[0] ?? null;
   const nextAvailableAt = reward?.lastCollectedAt ? new Date(new Date(reward.lastCollectedAt).getTime() + 24 * 60 * 60 * 1000).toISOString() : null;
   const canClaim = reward?.membershipStatus === 'active' && !reward.pendingRequest && (!nextAvailableAt || new Date(nextAvailableAt).getTime() <= Date.now());
-  res.json({ data: { config: settings.rows[0] ?? { network: '', depositAddress: '', depositQr: '' }, summary: summary.rows[0], transactions: transactions.rows, reward: reward ? { ...reward, nextAvailableAt, canClaim } : null } });
+  res.json({ data: { config: settings.rows[0] ?? { network: '', depositAddress: '', depositQr: '', minimumWithdrawal: '1', maximumWithdrawal: '1000000' }, payoutProfile: payoutProfile.rows[0] ?? null, summary: summary.rows[0], transactions: transactions.rows, reward: reward ? { ...reward, nextAvailableAt, canClaim } : null } });
 }));
 
 const depositSchema = z.object({ tierKey: z.enum(['starter', 'growth', 'pro']).optional(), amount: z.coerce.number().min(10).max(1_000_000_000), txHash: z.string().trim().min(16).max(200), proofImage: z.string().max(1_700_000).refine((value) => /^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(value), 'Screenshot must be a PNG, JPEG, or WebP image.').optional(), note: z.string().trim().max(500).optional() });
@@ -425,14 +454,26 @@ app.post('/api/v1/wallet/deposits', requireUser, asyncRoute(async (req, res) => 
   }
 }));
 
-const withdrawalSchema = z.object({ amount: z.coerce.number().positive().max(1_000_000_000), walletAddress: z.string().trim().min(8).max(200), reason: z.string().trim().min(3).max(500) });
+const withdrawalSchema = z.object({ amount: z.coerce.number().positive().max(1_000_000_000), reason: z.string().trim().min(3).max(500) });
 app.post('/api/v1/wallet/withdrawals', requireUser, asyncRoute(async (req, res) => {
   const parsed = withdrawalSchema.safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ error: 'Enter a positive amount, destination wallet address, and withdrawal reason.' });
+  if (!parsed.success) return res.status(400).json({ error: 'Enter a positive withdrawal amount and reason.' });
   const client = await pool.connect();
   try {
     await client.query('begin');
     await client.query('select id from users where id = $1 for update', [req.userId]);
+    const profile = await client.query('select payout_address, payout_qr_data_url from user_wallet_profiles where user_id = $1 for update', [req.userId]);
+    if (!profile.rows[0]?.payout_address || !profile.rows[0]?.payout_qr_data_url) {
+      await client.query('rollback');
+      return res.status(400).json({ error: 'Save your payout wallet address and QR image before requesting a withdrawal.' });
+    }
+    const limits = await client.query('select minimum_withdrawal, maximum_withdrawal from platform_wallet_config where id = 1');
+    const minimum = Number(limits.rows[0]?.minimum_withdrawal ?? 1);
+    const maximum = Number(limits.rows[0]?.maximum_withdrawal ?? 1_000_000);
+    if (parsed.data.amount < minimum || parsed.data.amount > maximum) {
+      await client.query('rollback');
+      return res.status(400).json({ error: `Withdrawal amount must be between ${minimum} and ${maximum} USDT.` });
+    }
     const balance = await client.query(`select
       greatest(0,
         coalesce(sum(amount) filter (where kind in ('deposit', 'daily_reward') and status = 'confirmed'), 0)
@@ -444,10 +485,10 @@ app.post('/api/v1/wallet/withdrawals', requireUser, asyncRoute(async (req, res) 
       await client.query('rollback');
       return res.status(400).json({ error: 'The requested withdrawal exceeds your available balance.' });
     }
-    const { rows } = await client.query(`insert into wallet_transactions (user_id, kind, amount, status, wallet_address, note, request_reason)
-      values ($1, 'withdrawal', $2, 'pending', $3, $4, $5)
+    const { rows } = await client.query(`insert into wallet_transactions (user_id, kind, amount, status, wallet_address, recipient_qr_data_url, note, request_reason)
+      values ($1, 'withdrawal', $2, 'pending', $3, $4, $5, $6)
       returning id, kind, amount::text, status, wallet_address as "walletAddress", created_at as "createdAt"`,
-    [req.userId, parsed.data.amount, parsed.data.walletAddress, parsed.data.reason, parsed.data.reason]);
+    [req.userId, parsed.data.amount, profile.rows[0].payout_address, profile.rows[0].payout_qr_data_url, parsed.data.reason, parsed.data.reason]);
     await client.query('commit');
     res.status(201).json({ data: rows[0], notice: 'Withdrawal request sent to the administrator. The amount is reserved while it is reviewed.' });
   } catch (error) { await client.query('rollback'); throw error; }
@@ -540,5 +581,8 @@ app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
 });
 
 const port = Number(process.env.API_PORT ?? 4000);
-app.listen(port, '0.0.0.0', () => console.log(`Trade Market API listening on port ${port}`));
+const server = app.listen(port, '0.0.0.0', () => console.log(`Trade Market API listening on port ${port}`));
+for (const signal of ['SIGTERM', 'SIGINT'] as const) {
+  process.once(signal, () => server.close(() => { void pool.end(); }));
+}
 

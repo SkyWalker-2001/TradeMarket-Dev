@@ -13,9 +13,9 @@ import { apiRequest, clearSession, getAuthToken, getStoredUser } from '@/lib/api
 type View = 'Overview' | 'Users' | 'Deposits' | 'Withdrawals' | 'Ledger' | 'Wallet settings' | 'Referrals';
 type Summary = { members: number; paperTrades: number; referrals: number; memberships: number };
 type Member = { id: string; email: string; name: string; referralCode: string; createdAt: string; deposits: string; earnings: string; available: string; directReferrals: number; membershipTier: string | null; membershipStatus: string | null };
-type Transaction = { id: string; userId: string; email: string; userName: string; kind: string; tierKey: string | null; amount: string; status: string; txHash: string; walletAddress: string; note: string; requestReason?: string; cancellationReason?: string; reviewReason?: string; cancellationReviewReason?: string; direction: 'credit'|'debit'|null; proofAvailable: boolean; createdAt: string; reviewedAt: string | null; reviewerEmail: string | null };
+type Transaction = { id: string; userId: string; email: string; userName: string; kind: string; tierKey: string | null; amount: string; status: string; txHash: string; walletAddress: string; note: string; requestReason?: string; cancellationReason?: string; reviewReason?: string; cancellationReviewReason?: string; direction: 'credit'|'debit'|null; proofAvailable: boolean; payoutQrAvailable: boolean; createdAt: string; reviewedAt: string | null; reviewerEmail: string | null };
 type Finance = {
-  config: { network: string; depositAddress: string; depositQr: string; updatedAt?: string };
+  config: { network: string; depositAddress: string; depositQr: string; minimumWithdrawal: string; maximumWithdrawal: string; updatedAt?: string };
   users: Member[];
   transactions: Transaction[];
   referrals: { id: string; status: string; createdAt: string; referrerEmail: string; referredEmail: string | null; referrerCode: string }[];
@@ -48,9 +48,12 @@ export default function AdminPage() {
   const [network, setNetwork] = useState('');
   const [depositAddress, setDepositAddress] = useState('');
   const [depositQr, setDepositQr] = useState('');
+  const [minimumWithdrawal, setMinimumWithdrawal] = useState('1');
+  const [maximumWithdrawal, setMaximumWithdrawal] = useState('1000000');
   const [txHashes, setTxHashes] = useState<Record<string, string>>({});
   const [reviewReasons, setReviewReasons] = useState<Record<string, string>>({});
   const [proofImages, setProofImages] = useState<Record<string, string>>({});
+  const [payoutQrImages, setPayoutQrImages] = useState<Record<string, string>>({});
   const [adjustmentUser, setAdjustmentUser] = useState('');
   const [adjustmentDirection, setAdjustmentDirection] = useState<'credit'|'debit'>('credit');
   const [adjustmentAmount, setAdjustmentAmount] = useState('');
@@ -67,6 +70,8 @@ export default function AdminPage() {
       setNetwork(financeResponse.data.config.network ?? '');
       setDepositAddress(financeResponse.data.config.depositAddress ?? '');
       setDepositQr(financeResponse.data.config.depositQr ?? '');
+      setMinimumWithdrawal(financeResponse.data.config.minimumWithdrawal ?? '1');
+      setMaximumWithdrawal(financeResponse.data.config.maximumWithdrawal ?? '1000000');
       setStatus('ready'); setMessage('');
     } catch (error) {
       const text = error instanceof Error ? error.message : 'Could not load admin data.';
@@ -113,8 +118,8 @@ export default function AdminPage() {
   async function saveWalletConfig() {
     setBusy(true); setFeedback('');
     try {
-      await apiRequest('/admin/wallet-config', { method: 'PUT', body: JSON.stringify({ network, depositAddress, depositQr }) });
-      setFeedback('Deposit wallet settings saved.'); await load();
+      await apiRequest('/admin/wallet-config', { method: 'PUT', body: JSON.stringify({ network, depositAddress, depositQr, minimumWithdrawal: Number(minimumWithdrawal), maximumWithdrawal: Number(maximumWithdrawal) }) });
+      setFeedback('Wallet settings and withdrawal limits saved.'); await load();
     } catch (error) { setFeedback(error instanceof Error ? error.message : 'Could not save deposit settings.'); }
     finally { setBusy(false); }
   }
@@ -148,6 +153,14 @@ export default function AdminPage() {
     } catch (error) { setFeedback(error instanceof Error ? error.message : 'Could not load the payment screenshot.'); }
   }
 
+  async function togglePayoutQr(id: string) {
+    if (payoutQrImages[id]) { setPayoutQrImages((current) => { const next = { ...current }; delete next[id]; return next; }); return; }
+    try {
+      const result = await apiRequest<{ data: { payoutQr: string } }>(`/admin/wallet-transactions/${id}/payout-qr`);
+      setPayoutQrImages((current) => ({ ...current, [id]: result.data.payoutQr }));
+    } catch (error) { setFeedback(error instanceof Error ? error.message : 'Could not load the payout QR image.'); }
+  }
+
   async function submitAdjustment(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!adjustmentUser) { setFeedback('Choose a member for this ledger adjustment.'); return; }
@@ -164,7 +177,7 @@ export default function AdminPage() {
       <td><b>{tx.userName || tx.email}</b><small>{tx.email}</small><small className="admin-mono">{shortId(tx.userId)}</small></td>
       <td>{tx.direction ? `${tx.direction} adjustment` : tx.kind.replace('_', ' ')}{tx.tierKey && <small>{tx.tierKey} membership</small>}{tx.note && <small title={tx.note}>{tx.note}</small>}{tx.requestReason && <small>Request: {tx.requestReason}</small>}{tx.cancellationReason && <small>Cancel: {tx.cancellationReason}</small>}{tx.reviewReason && <small>Refusal: {tx.reviewReason}</small>}{tx.cancellationReviewReason && <small>Cancel decision: {tx.cancellationReviewReason}</small>}</td>
       <td>{tx.direction === 'debit' ? '−' : tx.direction === 'credit' ? '+' : ''}{usdt(tx.amount)}</td>
-      <td><span className="admin-reference">{tx.txHash || tx.walletAddress || '—'}</span><small>{new Date(tx.createdAt).toLocaleString()}</small>{tx.proofAvailable && <><button className="admin-proof-toggle" onClick={() => void toggleProof(tx.id)}>{proofImages[tx.id] ? 'Hide screenshot' : 'View screenshot'}</button>{proofImages[tx.id] && <a href={proofImages[tx.id]} target="_blank" rel="noreferrer"><img className="admin-proof-preview" src={proofImages[tx.id]} alt="User payment screenshot"/></a>}</>}</td>
+      <td><span className="admin-reference">{tx.txHash || tx.walletAddress || '—'}</span><small>{new Date(tx.createdAt).toLocaleString()}</small>{tx.payoutQrAvailable && <><button className="admin-proof-toggle" onClick={() => void togglePayoutQr(tx.id)}>{payoutQrImages[tx.id] ? 'Hide payout QR' : 'View payout QR'}</button>{payoutQrImages[tx.id] && <a href={payoutQrImages[tx.id]} target="_blank" rel="noreferrer"><img className="admin-proof-preview" src={payoutQrImages[tx.id]} alt="Member payout wallet QR"/></a>}</>}{tx.proofAvailable && <><button className="admin-proof-toggle" onClick={() => void toggleProof(tx.id)}>{proofImages[tx.id] ? 'Hide screenshot' : 'View screenshot'}</button>{proofImages[tx.id] && <a href={proofImages[tx.id]} target="_blank" rel="noreferrer"><img className="admin-proof-preview" src={proofImages[tx.id]} alt="User payment screenshot"/></a>}</>}</td>
       <td><span className={`wallet-status ${tx.status}`}>{tx.status}</span></td>
       <td>{tx.status === 'pending' || tx.status === 'cancel_requested' ? <div className="admin-row-actions admin-review-actions">{tx.status === 'cancel_requested' ? <><button disabled={busy} onClick={() => void reviewTransaction(tx.id, 'approve_cancellation')}>Approve cancellation</button><textarea aria-label="Reason for denying cancellation" maxLength={500} placeholder="Reason if denying cancellation" value={reviewReasons[tx.id] ?? ''} onChange={(event) => setReviewReasons((old) => ({ ...old, [tx.id]: event.target.value }))}/><button className="reject-action" disabled={busy || (reviewReasons[tx.id]?.trim().length ?? 0) < 3} onClick={() => void reviewTransaction(tx.id, 'deny_cancellation')}>Deny cancellation</button></> : tx.kind === 'withdrawal' ? <><input aria-label="Payout transaction hash" placeholder="Payout tx hash" value={txHashes[tx.id] ?? ''} onChange={(event) => setTxHashes((old) => ({ ...old, [tx.id]: event.target.value }))}/><button disabled={busy} onClick={() => void reviewTransaction(tx.id, 'pay_withdrawal')}>Mark paid</button><textarea aria-label="Reason for refusing withdrawal" maxLength={500} placeholder="Reason for refusal" value={reviewReasons[tx.id] ?? ''} onChange={(event) => setReviewReasons((old) => ({ ...old, [tx.id]: event.target.value }))}/><button className="reject-action" disabled={busy || (reviewReasons[tx.id]?.trim().length ?? 0) < 3} onClick={() => void reviewTransaction(tx.id, 'reject')}>Reject</button></> : <><button disabled={busy} onClick={() => void reviewTransaction(tx.id, tx.kind === 'deposit' ? 'confirm_deposit' : 'confirm_reward')}><Check size={12}/>{tx.kind === 'deposit' ? 'Confirm deposit' : 'Approve reward'}</button><textarea aria-label="Reason for refusing request" maxLength={500} placeholder="Reason for refusal" value={reviewReasons[tx.id] ?? ''} onChange={(event) => setReviewReasons((old) => ({ ...old, [tx.id]: event.target.value }))}/><button className="reject-action" disabled={busy || (reviewReasons[tx.id]?.trim().length ?? 0) < 3} onClick={() => void reviewTransaction(tx.id, 'reject')}><X size={12}/>Reject</button></>}</div> : <small>{tx.reviewerEmail ? `Reviewed by ${tx.reviewerEmail}` : 'Reviewed'}{tx.reviewReason && <span className="admin-review-reason">Reason: {tx.reviewReason}</span>}{tx.cancellationReviewReason && <span className="admin-review-reason">Cancellation decision: {tx.cancellationReviewReason}</span>}</small>}</td>
     </tr>)}</tbody></table></div> : <div className="admin-empty">No matching transactions.</div>;
@@ -210,7 +223,7 @@ export default function AdminPage() {
       {panel('Post an audited balance adjustment', 'LEDGER CORRECTION', 'Credits and debits become permanent ledger entries with the admin, timestamp, and reason recorded. Debit adjustments cannot exceed the available balance.', <form className="admin-adjustment-form" onSubmit={(event) => void submitAdjustment(event)}><label>Member<select required value={adjustmentUser} onChange={(event) => setAdjustmentUser(event.target.value)}><option value="">Select member</option>{members.map((member) => <option key={member.id} value={member.id}>{member.name || member.email} · {member.email}</option>)}</select></label><label>Direction<select value={adjustmentDirection} onChange={(event) => setAdjustmentDirection(event.target.value as 'credit'|'debit')}><option value="credit">Credit balance</option><option value="debit">Debit balance</option></select></label><label>Amount (USDT)<input required type="number" min="0.00000001" step="0.00000001" value={adjustmentAmount} onChange={(event) => setAdjustmentAmount(event.target.value)} placeholder="0.00"/></label><label className="admin-adjustment-reason">Reason<input required minLength={3} maxLength={500} value={adjustmentReason} onChange={(event) => setAdjustmentReason(event.target.value)} placeholder="Explain the correction for the audit record"/></label><button className="admin-row-button" type="submit" disabled={busy || !adjustmentUser || Number(adjustmentAmount) <= 0 || adjustmentReason.trim().length < 3}>{busy ? 'Saving…' : 'Post ledger entry'}</button></form>)}
     </>;
 
-    if (active === 'Wallet settings') return panel('Receiving wallet', 'USDT DEPOSIT SETTINGS', 'Set the network and public address shown to members. The app does not store private keys or send blockchain transactions.', <div className="admin-wallet-form"><label>USDT network<input value={network} onChange={(event) => setNetwork(event.target.value)} placeholder="BEP20 (USDT)" maxLength={60}/></label><label>Deposit address<input value={depositAddress} onChange={(event) => setDepositAddress(event.target.value)} placeholder="Public receiving wallet address" maxLength={200}/></label><label className="admin-qr-picker">QR image<input type="file" accept="image/png,image/jpeg,image/webp" onChange={chooseQr}/><small><Upload size={12}/>PNG, JPEG, or WebP up to 1.2 MB</small></label>{depositQr && <img className="admin-qr-preview" src={depositQr} alt="Deposit QR preview"/>}<button className="admin-refresh admin-save" disabled={busy || !network.trim() || !depositAddress.trim()} onClick={() => void saveWalletConfig()}><Save size={14}/>{busy ? 'Saving…' : 'Save wallet settings'}</button></div>);
+    if (active === 'Wallet settings') return panel('Wallet and withdrawal rules', 'USDT PAYMENT SETTINGS', 'Configure the deposit destination and the allowed amount range for each member withdrawal request.', <div className="admin-wallet-form"><label>USDT network<input value={network} onChange={(event) => setNetwork(event.target.value)} placeholder="BEP20 (USDT)" maxLength={60}/></label><label>Deposit address<input value={depositAddress} onChange={(event) => setDepositAddress(event.target.value)} placeholder="Public receiving wallet address" maxLength={200}/></label><label className="admin-qr-picker">Deposit QR image<input type="file" accept="image/png,image/jpeg,image/webp" onChange={chooseQr}/><small><Upload size={12}/>PNG, JPEG, or WebP up to 1.2 MB</small></label>{depositQr && <img className="admin-qr-preview" src={depositQr} alt="Deposit QR preview"/>}<label>Minimum withdrawal (USDT)<input type="number" min="0.00000001" step="0.01" value={minimumWithdrawal} onChange={(event) => setMinimumWithdrawal(event.target.value)}/></label><label>Maximum per request (USDT)<input type="number" min="0.00000001" step="0.01" value={maximumWithdrawal} onChange={(event) => setMaximumWithdrawal(event.target.value)}/></label><small className="admin-panel-copy">The API rejects requests outside this range.</small><button className="admin-refresh admin-save" disabled={busy || !network.trim() || !depositAddress.trim() || Number(minimumWithdrawal) <= 0 || Number(maximumWithdrawal) < Number(minimumWithdrawal)} onClick={() => void saveWalletConfig()}><Save size={14}/>{busy ? 'Saving…' : 'Save wallet settings'}</button></div>);
     return panel('Referral history', 'REFERRAL SYSTEM', 'Track which member invited each new account and when the referral joined.', finance.referrals.length ? <div className="admin-table-wrap"><table className="admin-table"><thead><tr><th>Referrer</th><th>Referral code</th><th>Joined member</th><th>Status</th><th>Date</th></tr></thead><tbody>{finance.referrals.map((item) => <tr key={item.id}><td>{item.referrerEmail}</td><td>{item.referrerCode}</td><td>{item.referredEmail ?? 'Account removed'}</td><td>{item.status}</td><td>{new Date(item.createdAt).toLocaleDateString()}</td></tr>)}</tbody></table></div> : <div className="admin-empty">No referred accounts yet.</div>);
   }
 
