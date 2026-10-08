@@ -21,7 +21,7 @@ Open `http://localhost:3000`. The API health endpoint is `http://localhost:4000/
 - `/dashboard` — market samples, paper trading, wallet, memberships, reward claims, referrals, settings, and transaction history
 - `/admin` — protected user, deposit, withdrawal, ledger, referral, and wallet configuration tools
 
-Membership deposit requests use the configured USDT network (BEP20). Admins manually review deposits and withdrawal requests. Reward claims are 0.1% of the confirmed membership deposit, limited to one pending claim and a 24-hour interval from the previous approved reward. Approved rewards are added to the user's earnings and available wallet balance. Reward and withdrawal decisions are manually reviewed; refusal explanations are stored with the transaction.
+Membership deposit requests use the configured USDT network (BEP20). Admins manually review deposits and withdrawal requests. Users can collect a reward equal to 0.1% of their confirmed membership deposit once every rolling 24 hours; collection immediately credits the earnings and available wallet balances. Reward and withdrawal decisions are recorded in the ledger; refusal explanations are stored with the transaction.
 
 Market prices and paper trades are simulated sample data and do not place real market orders. Configure the receiving wallet under Admin → Wallet settings before accepting deposits.
 

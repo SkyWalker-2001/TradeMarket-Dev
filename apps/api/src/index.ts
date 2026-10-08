@@ -480,23 +480,23 @@ app.post('/api/v1/wallet/rewards/claim', requireUser, asyncRoute(async (req, res
     await client.query('begin');
     const member = await client.query("select tier_key, status, deposit_amount::text as deposit_amount from user_memberships where user_id = $1 for update", [req.userId]);
     const activeMembership = member.rows[0];
-    if (activeMembership?.status !== 'active' || Number(activeMembership.deposit_amount) <= 0) { await client.query('rollback'); return res.status(403).json({ error: 'An active, deposit-confirmed membership is required to request a daily reward.' }); }
+    if (activeMembership?.status !== 'active' || Number(activeMembership.deposit_amount) <= 0) { await client.query('rollback'); return res.status(403).json({ error: 'An active, deposit-confirmed membership is required to collect a daily reward.' }); }
     const recent = await client.query(`select max(coalesce(reviewed_at, created_at)) as "lastCollectedAt",
       exists(select 1 from wallet_transactions where user_id = $1 and kind = 'daily_reward' and status = 'pending') as pending
       from wallet_transactions where user_id = $1 and kind = 'daily_reward' and status = 'confirmed'`, [req.userId]);
-    if (recent.rows[0].pending) { await client.query('rollback'); return res.status(409).json({ error: 'A reward request is already awaiting administrator review.' }); }
+    if (recent.rows[0].pending) { await client.query('rollback'); return res.status(409).json({ error: 'A previous reward request is still pending. Contact the administrator for help.' }); }
     const lastCollectedAt = recent.rows[0].lastCollectedAt;
     const nextAvailableAt = lastCollectedAt ? new Date(new Date(lastCollectedAt).getTime() + 24 * 60 * 60 * 1000) : null;
     if (nextAvailableAt && nextAvailableAt.getTime() > Date.now()) { await client.query('rollback'); return res.status(409).json({ error: `Your next reward is available after ${nextAvailableAt.toISOString()}.` }); }
     const rewardAmount = Number(activeMembership.deposit_amount) * 0.001;
-    const { rows } = await client.query(`insert into wallet_transactions (user_id, kind, amount, status, note)
-      values ($1, 'daily_reward', $2, 'pending', 'Daily reward request · 0.1% of confirmed membership deposit')
-      returning id, kind, amount::text, status, created_at as "createdAt"`, [req.userId, rewardAmount]);
+    const { rows } = await client.query(`insert into wallet_transactions (user_id, kind, amount, status, note, reviewed_at)
+      values ($1, 'daily_reward', $2, 'confirmed', 'Daily reward collected · 0.1% of confirmed membership deposit', now())
+      returning id, kind, amount::text, status, created_at as "createdAt", reviewed_at as "collectedAt"`, [req.userId, rewardAmount]);
     await client.query('commit');
-    res.status(201).json({ data: rows[0], notice: 'Reward request sent to the administrator for review. The 24-hour timer starts when it is approved and added to your earnings wallet.' });
+    res.status(201).json({ data: rows[0], notice: `${rewardAmount.toFixed(2)} USDT has been added to your earnings wallet. Your next reward is available in 24 hours.` });
   } catch (error) {
     await client.query('rollback');
-    if ((error as { code?: string }).code === '23505') return res.status(409).json({ error: 'A reward request is already awaiting administrator review.' });
+    if ((error as { code?: string }).code === '23505') return res.status(409).json({ error: 'A previous reward request is still pending. Contact the administrator for help.' });
     throw error;
   } finally { client.release(); }
 }));
