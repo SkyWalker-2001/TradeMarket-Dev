@@ -8,7 +8,7 @@ Requirements: Docker Desktop with Docker Compose.
 
 ```powershell
 Copy-Item .env.example .env
-# Set POSTGRES_PASSWORD and JWT_SECRET in .env before using this outside a local demo.
+# Set POSTGRES_PASSWORD, INITIAL_ADMIN_PASSWORD, and JWT_SECRET in .env.
 docker compose up --build
 ```
 
@@ -22,6 +22,8 @@ Open `http://localhost:3000`. The API health endpoint is `http://localhost:4000/
 - `/admin` — protected user, deposit, withdrawal, ledger, referral, and wallet configuration tools
 
 Membership deposit requests use the configured USDT network (BEP20). Admins manually review deposits and withdrawal requests. Users can collect a reward equal to 0.1% of their confirmed membership deposit once every rolling 24 hours; collection immediately credits the earnings and available wallet balances. Reward and withdrawal decisions are recorded in the ledger; refusal explanations are stored with the transaction.
+
+On first initialization of a new PostgreSQL data volume, `database/007_seed_initial_admin.sh` creates `INITIAL_ADMIN_EMAIL` as an administrator and hashes `INITIAL_ADMIN_PASSWORD` with PostgreSQL bcrypt support. Existing accounts are promoted to admin without resetting their password. This initialization script runs only when PostgreSQL creates a fresh data volume; do not delete a production volume to rerun it.
 
 Market prices and paper trades are simulated sample data and do not place real market orders. Configure the receiving wallet under Admin → Wallet settings before accepting deposits.
 

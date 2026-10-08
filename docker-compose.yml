@@ -6,6 +6,8 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-trademarket}
       POSTGRES_USER: ${POSTGRES_USER:-trademarket}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-this-local-password}
+      INITIAL_ADMIN_EMAIL: ${INITIAL_ADMIN_EMAIL:-admin@trademaeket.com}
+      INITIAL_ADMIN_PASSWORD: ${INITIAL_ADMIN_PASSWORD:?Set INITIAL_ADMIN_PASSWORD in .env}
     ports:
       - "5432:5432"
     volumes:
@@ -16,6 +18,7 @@ services:
       - ./database/004_admin_account_management.sql:/docker-entrypoint-initdb.d/004-admin-account-management.sql:ro
       - ./database/005_withdrawal_reasons.sql:/docker-entrypoint-initdb.d/005-withdrawal-reasons.sql:ro
       - ./database/006_reward_cooldown.sql:/docker-entrypoint-initdb.d/006-reward-cooldown.sql:ro
+      - ./database/007_seed_initial_admin.sh:/docker-entrypoint-initdb.d/007-seed-initial-admin.sh:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
